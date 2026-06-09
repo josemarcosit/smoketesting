@@ -1,5 +1,9 @@
-http://www.facebook.com
-http://www.amazon.com
-http://www.apple.com
-http://www.netflix.com
-http://www.google.com
+https://www.fifa.com
+https://www.espn.com.br
+https://ge.globo.com
+https://www.sofascore.com
+https://www.transfermarkt.com
+https://www.goal.com
+https://www.uefa.com
+https://www.the-afc.com
+https://www.conmebol.com
