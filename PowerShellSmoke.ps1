@@ -1,30 +1,34 @@
 
 <#
 .SYNOPSIS
-    PowerShell HTTP Smoke Testing
+    PowerShell HTTP Smoke Testing - Version 3.0
 
 .DESCRIPTION
-    Reads a list of URLs from a text file and performs HTTP requests
-    to verify whether the target endpoints are responding successfully.
+    Performs HTTP smoke tests against a list of URLs.
+    Measures response time and exports the results to a CSV report.
 
 .NOTES
-    Author: PowerShell Smoke Testing
-    Version: 2.0
+    Version: 3.0
     Input File: targets.config
+    Output File: reports/smoke-test-results.csv
 #>
 
 # Configuration
 $TargetFilePath = ".\targets.config"
+$ReportDirectory = ".\reports"
+$ReportFilePath = Join-Path $ReportDirectory "smoke-test-results.csv"
 $RequestTimeout = 5
 
-# Initialize test counters
+# Initialize counters and results
 $TotalTargets = 0
 $SuccessfulTargets = 0
 $FailedTargets = 0
+$TestResults = [System.Collections.Generic.List[PSObject]]::new()
 
 # Display script header
 Write-Host "`n======================================" -ForegroundColor Cyan
-Write-Host "       POWERSHELL SMOKE TESTING" -ForegroundColor Cyan
+Write-Host "       POWERHELL SMOKE TESTING" -ForegroundColor Cyan
+Write-Host "                VERSION 3.0" -ForegroundColor Cyan
 Write-Host "======================================`n" -ForegroundColor Cyan
 
 # Validate input file
@@ -33,7 +37,12 @@ if (-not (Test-Path -Path $TargetFilePath -PathType Leaf)) {
     exit 1
 }
 
-# Load URLs from the input file
+# Create report directory if necessary
+if (-not (Test-Path -Path $ReportDirectory)) {
+    New-Item -Path $ReportDirectory -ItemType Directory -Force | Out-Null
+}
+
+# Load and clean target URLs
 $UrlList = Get-Content -Path $TargetFilePath |
     Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
     ForEach-Object { $_.Trim() }
@@ -48,6 +57,11 @@ foreach ($Url in $UrlList) {
 
     $TotalTargets++
 
+    $StatusCode = $null
+    $ResponseTime = $null
+    $Result = "FAILED"
+    $ErrorMessage = $null
+
     # Validate URL format
     $ParsedUri = $null
 
@@ -57,44 +71,90 @@ foreach ($Url in $UrlList) {
         [ref]$ParsedUri
     ) -or $ParsedUri.Scheme -notin @("http", "https")) {
 
+        $ErrorMessage = "Invalid URL format"
         Write-Host "[INVALID] $Url" -ForegroundColor Yellow
-        $FailedTargets++
-        continue
     }
+    else {
 
-    try {
-        # Send HTTP GET request
-        $Response = Invoke-WebRequest `
-            -Uri $Url `
-            -Method Get `
-            -TimeoutSec $RequestTimeout `
-            -UseBasicParsing `
-            -ErrorAction Stop
+        # Start response time measurement
+        $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Check HTTP response status
-        if ($Response.StatusCode -ge 200 -and $Response.StatusCode -lt 300) {
+        try {
+            # Send HTTP GET request
+            $Response = Invoke-WebRequest `
+                -Uri $Url `
+                -Method Get `
+                -TimeoutSec $RequestTimeout `
+                -UseBasicParsing `
+                -ErrorAction Stop
 
-            Write-Host "[SUCCESS] HTTP $($Response.StatusCode) - $Url" `
-                -ForegroundColor Green
+            $StatusCode = [int]$Response.StatusCode
 
-            $SuccessfulTargets++
+            # Stop response time measurement
+            $Stopwatch.Stop()
+            $ResponseTime = [math]::Round($Stopwatch.Elapsed.TotalMilliseconds, 2)
+
+            # Evaluate HTTP response
+            if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+
+                $Result = "SUCCESS"
+                $SuccessfulTargets++
+
+                Write-Host "[SUCCESS] HTTP $StatusCode | ${ResponseTime}ms | $Url" `
+                    -ForegroundColor Green
+            }
+            else {
+
+                $FailedTargets++
+
+                Write-Host "[FAILED] HTTP $StatusCode | ${ResponseTime}ms | $Url" `
+                    -ForegroundColor Red
+            }
         }
-        else {
+        catch {
+            $Stopwatch.Stop()
 
-            Write-Host "[FAILED] HTTP $($Response.StatusCode) - $Url" `
-                -ForegroundColor Red
+            $ResponseTime = [math]::Round($Stopwatch.Elapsed.TotalMilliseconds, 2)
+            $ErrorMessage = $_.Exception.Message
+
+            # Extract HTTP status code when available
+            if ($_.Exception.Response) {
+                $StatusCode = [int]$_.Exception.Response.StatusCode
+            }
 
             $FailedTargets++
+
+            Write-Host "[ERROR] ${ResponseTime}ms | $Url | $ErrorMessage" `
+                -ForegroundColor Red
         }
     }
-    catch {
-        # Handle HTTP errors, connection failures and timeouts
-        $ErrorMessage = $_.Exception.Message
 
-        Write-Host "[ERROR] $Url - $ErrorMessage" -ForegroundColor Red
+    # Store test result
+    $TestResults.Add([PSCustomObject]@{
+        Timestamp     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        URL           = $Url
+        StatusCode    = $StatusCode
+        ResponseTimeMs = $ResponseTime
+        Result        = $Result
+        ErrorMessage  = $ErrorMessage
+    })
+}
 
-        $FailedTargets++
-    }
+# Export results to CSV
+try {
+    $TestResults | Export-Csv `
+        -Path $ReportFilePath `
+        -NoTypeInformation `
+        -Encoding UTF8 `
+        -Delimiter ";"
+
+    Write-Host "`n[INFO] Report successfully exported: $ReportFilePath" `
+        -ForegroundColor Cyan
+}
+catch {
+    Write-Host "[ERROR] Failed to export CSV report: $($_.Exception.Message)" `
+        -ForegroundColor Red
+    exit 1
 }
 
 # Display execution summary
@@ -102,10 +162,16 @@ Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "              TEST SUMMARY" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
 
-Write-Host "Total Targets:    $TotalTargets"
-Write-Host "Successful:       $SuccessfulTargets" -ForegroundColor Green
+Write-Host "Total Targets:     $TotalTargets"
+Write-Host "Successful:        $SuccessfulTargets" -ForegroundColor Green
 Write-Host "Failed:            $FailedTargets" -ForegroundColor Red
 
+if ($ResponseTimes = @($TestResults | Where-Object { $null -ne $_.ResponseTimeMs })) {
+    $AverageResponseTime = ($ResponseTimes | Measure-Object -Property ResponseTimeMs -Average).Average
+    Write-Host "Average Response:  $([math]::Round($AverageResponseTime, 2)) ms"
+}
+
+Write-Host "CSV Report:        $ReportFilePath"
 Write-Host "======================================`n" -ForegroundColor Cyan
 
 # Return an appropriate exit code
