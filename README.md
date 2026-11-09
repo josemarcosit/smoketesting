@@ -15,28 +15,38 @@ https://geekprank.com
 
 ## Example output
 ```prompt
-======================================
-       POWERHELL SMOKE TESTING
-                VERSION 3.0
-======================================
+==========================================
+       POWERSHELL SMOKE TESTING
+                VERSION 4.0
+==========================================
 
-[SUCCESS] HTTP 200 | 946.62ms | https://www.windows93.net                                                               
-[SUCCESS] HTTP 200 | 970.41ms | https://www.asciimation.co.nz                                                           
-[SUCCESS] HTTP 200 | 1075.74ms | https://dos.zone                                                                       
-[SUCCESS] HTTP 200 | 589.07ms | https://telehack.com                                                                    
-[ERROR] 278.89ms | https://t.ly | The replica status code does not indicate success: 403 (Forbidden).
-[ERROR] 46.85ms | https://is.gd | The replica status code does not indicate success: 403 (Forbidden).
-[SUCCESS] HTTP 200 | 690.79ms | https://geekprank.com                                                                   
+[INFO] Starting parallel HTTP tests...
+[INFO] Total targets: 7
+[INFO] Max concurrency: 5
+[INFO] Retry attempts: 2
 
-[INFO] Report successfully exported: .\reports\smoke-test-results.csv
+[SUCCESS] HTTP 200 | 579.3ms | https://telehack.com                                                                     
+[SUCCESS] HTTP 200 | 675.28ms | https://www.windows93.net
+[SUCCESS] HTTP 200 | 1098.22ms | https://dos.zone
+[SUCCESS] HTTP 200 | 1310.84ms | https://www.asciimation.co.nz
+[SUCCESS] HTTP 200 | 739.82ms | https://geekprank.com
+[FAILED] HTTP 403 | 8.87ms | https://t.ly  | This host is unknown. (t.ly:443)
+[FAILED] HTTP 403 | 30.74ms | https://is.gd  | The replica's status code does not indicate success: 403 (Forbidden).
 
-======================================
+[INFO] Reports generated successfully.
+
+==========================================
               TEST SUMMARY
-======================================
-Total Targets:     7
-Successful:        5
-Failed:            2
-Average Response:  656.91 ms
-CSV Report:        .\reports\smoke-test-results.csv
-======================================
+==========================================
+Total Targets:      7
+Successful:         5
+Failed:             2
+Slow Endpoints:     0
+Success Rate:       71.43%
+Average Latency:    634.72 ms
+Execution Time:     2.83 seconds
+
+CSV Report:         .\reports\smoke-test_20261108_205627.csv
+JSON Report:        .\reports\smoke-test_20261108_205627.json
+==========================================
 ```

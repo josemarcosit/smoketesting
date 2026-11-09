@@ -1,180 +1,290 @@
 
 <#
 .SYNOPSIS
-    PowerShell HTTP Smoke Testing - Version 3.0
+    Advanced PowerShell HTTP Smoke Testing - Version 4.0
 
 .DESCRIPTION
-    Performs HTTP smoke tests against a list of URLs.
-    Measures response time and exports the results to a CSV report.
+    Performs parallel HTTP smoke tests against a list of URLs.
+    Includes retry mechanism, response time measurement,
+    latency thresholds, and CSV/JSON reporting.
 
 .NOTES
-    Version: 3.0
+    Version: 4.0
+    Requirements: PowerShell 7+
     Input File: targets.config
-    Output File: reports/smoke-test-results.csv
+    Output Directory: reports/
 #>
 
-# Configuration
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
 $TargetFilePath = ".\targets.config"
 $ReportDirectory = ".\reports"
-$ReportFilePath = Join-Path $ReportDirectory "smoke-test-results.csv"
+
 $RequestTimeout = 5
+$MaxRetries = 2
+$MaxConcurrency = 5
+$LatencyThreshold = 2000
 
-# Initialize counters and results
-$TotalTargets = 0
-$SuccessfulTargets = 0
-$FailedTargets = 0
-$TestResults = [System.Collections.Generic.List[PSObject]]::new()
+# ==========================================
+# INITIALIZATION
+# ==========================================
 
-# Display script header
-Write-Host "`n======================================" -ForegroundColor Cyan
-Write-Host "       POWERHELL SMOKE TESTING" -ForegroundColor Cyan
-Write-Host "                VERSION 3.0" -ForegroundColor Cyan
-Write-Host "======================================`n" -ForegroundColor Cyan
+$StartTime = Get-Date
 
-# Validate input file
+Write-Host "`n==========================================" -ForegroundColor Cyan
+Write-Host "       POWERSHELL SMOKE TESTING" -ForegroundColor Cyan
+Write-Host "                VERSION 4.0" -ForegroundColor Cyan
+Write-Host "==========================================`n" -ForegroundColor Cyan
+
+# Verify PowerShell version
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host "[ERROR] PowerShell 7 or higher is required." -ForegroundColor Red
+    exit 1
+}
+
+# Validate target file
 if (-not (Test-Path -Path $TargetFilePath -PathType Leaf)) {
     Write-Host "[ERROR] Target file not found: $TargetFilePath" -ForegroundColor Red
     exit 1
 }
 
-# Create report directory if necessary
+# Create report directory
 if (-not (Test-Path -Path $ReportDirectory)) {
     New-Item -Path $ReportDirectory -ItemType Directory -Force | Out-Null
 }
 
-# Load and clean target URLs
-$UrlList = Get-Content -Path $TargetFilePath |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-    ForEach-Object { $_.Trim() }
+# Load targets
+$UrlList = @(
+    Get-Content -Path $TargetFilePath |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { $_.Trim() } |
+        Select-Object -Unique
+)
 
-if (-not $UrlList) {
-    Write-Host "[WARNING] No URLs found in the target file." -ForegroundColor Yellow
+if ($UrlList.Count -eq 0) {
+    Write-Host "[WARNING] No targets found." -ForegroundColor Yellow
     exit 0
 }
 
-# Process each URL
-foreach ($Url in $UrlList) {
+# ==========================================
+# PARALLEL HTTP TESTING
+# ==========================================
 
-    $TotalTargets++
+Write-Host "[INFO] Starting parallel HTTP tests..." -ForegroundColor Cyan
+Write-Host "[INFO] Total targets: $($UrlList.Count)"
+Write-Host "[INFO] Max concurrency: $MaxConcurrency"
+Write-Host "[INFO] Retry attempts: $MaxRetries`n"
 
-    $StatusCode = $null
-    $ResponseTime = $null
-    $Result = "FAILED"
-    $ErrorMessage = $null
+$TestResults = @(
+    $UrlList | ForEach-Object -Parallel {
 
-    # Validate URL format
-    $ParsedUri = $null
+        # Receive configuration from the parent scope
+        $Url = $_
+        $Timeout = $using:RequestTimeout
+        $Retries = $using:MaxRetries
+        $LatencyLimit = $using:LatencyThreshold
 
-    if (-not [System.Uri]::TryCreate(
-        $Url,
-        [System.UriKind]::Absolute,
-        [ref]$ParsedUri
-    ) -or $ParsedUri.Scheme -notin @("http", "https")) {
+        $Result = "FAILED"
+        $StatusCode = $null
+        $ResponseTime = $null
+        $ErrorMessage = $null
+        $Attempt = 0
 
-        $ErrorMessage = "Invalid URL format"
-        Write-Host "[INVALID] $Url" -ForegroundColor Yellow
+        # Validate URL
+        $ParsedUri = $null
+
+        if (-not [System.Uri]::TryCreate(
+            $Url,
+            [System.UriKind]::Absolute,
+            [ref]$ParsedUri
+        ) -or $ParsedUri.Scheme -notin @("http", "https")) {
+
+            $ErrorMessage = "Invalid URL format"
+        }
+        else {
+
+            # Retry failed requests
+            for ($Attempt = 1; $Attempt -le ($Retries + 1); $Attempt++) {
+
+                $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+                try {
+
+                    # Execute HTTP request
+                    $Response = Invoke-WebRequest `
+                        -Uri $Url `
+                        -Method Get `
+                        -TimeoutSec $Timeout `
+                        -UseBasicParsing `
+                        -ErrorAction Stop
+
+                    $Stopwatch.Stop()
+
+                    $StatusCode = [int]$Response.StatusCode
+
+                    $ResponseTime = [math]::Round(
+                        $Stopwatch.Elapsed.TotalMilliseconds, 2
+                    )
+
+                    if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
+                        $Result = "SUCCESS"
+                        $ErrorMessage = $null
+                        break
+                    }
+
+                    $ErrorMessage = "Unexpected HTTP status: $StatusCode"
+                }
+                catch {
+
+                    $Stopwatch.Stop()
+
+                    $ResponseTime = [math]::Round(
+                        $Stopwatch.Elapsed.TotalMilliseconds, 2
+                    )
+
+                    $ErrorMessage = $_.Exception.Message
+
+                    if ($_.Exception.Response) {
+                        $StatusCode = [int]$_.Exception.Response.StatusCode
+                    }
+                }
+
+                # Wait before retrying
+                if ($Attempt -le $Retries) {
+                    Start-Sleep -Seconds 1
+                }
+            }
+        }
+
+        # Evaluate latency
+        $LatencyStatus = "NORMAL"
+
+        if ($null -ne $ResponseTime -and $ResponseTime -gt $LatencyLimit) {
+            $LatencyStatus = "SLOW"
+        }
+
+        # Return structured result
+        [PSCustomObject]@{
+            Timestamp      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            URL            = $Url
+            StatusCode     = $StatusCode
+            ResponseTimeMs = $ResponseTime
+            Attempts       = $Attempt
+            Result         = $Result
+            LatencyStatus  = $LatencyStatus
+            ErrorMessage   = $ErrorMessage
+        }
+
+    } -ThrottleLimit $MaxConcurrency
+)
+
+# ==========================================
+# DISPLAY RESULTS
+# ==========================================
+
+foreach ($Test in $TestResults) {
+
+    $Message = "HTTP $($Test.StatusCode) | $($Test.ResponseTimeMs)ms | $($Test.URL)"
+
+    if ($Test.Result -eq "SUCCESS" -and $Test.LatencyStatus -eq "NORMAL") {
+        Write-Host "[SUCCESS] $Message" -ForegroundColor Green
+    }
+    elseif ($Test.Result -eq "SUCCESS") {
+        Write-Host "[SLOW] $Message" -ForegroundColor Yellow
     }
     else {
-
-        # Start response time measurement
-        $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-
-        try {
-            # Send HTTP GET request
-            $Response = Invoke-WebRequest `
-                -Uri $Url `
-                -Method Get `
-                -TimeoutSec $RequestTimeout `
-                -UseBasicParsing `
-                -ErrorAction Stop
-
-            $StatusCode = [int]$Response.StatusCode
-
-            # Stop response time measurement
-            $Stopwatch.Stop()
-            $ResponseTime = [math]::Round($Stopwatch.Elapsed.TotalMilliseconds, 2)
-
-            # Evaluate HTTP response
-            if ($StatusCode -ge 200 -and $StatusCode -lt 300) {
-
-                $Result = "SUCCESS"
-                $SuccessfulTargets++
-
-                Write-Host "[SUCCESS] HTTP $StatusCode | ${ResponseTime}ms | $Url" `
-                    -ForegroundColor Green
-            }
-            else {
-
-                $FailedTargets++
-
-                Write-Host "[FAILED] HTTP $StatusCode | ${ResponseTime}ms | $Url" `
-                    -ForegroundColor Red
-            }
-        }
-        catch {
-            $Stopwatch.Stop()
-
-            $ResponseTime = [math]::Round($Stopwatch.Elapsed.TotalMilliseconds, 2)
-            $ErrorMessage = $_.Exception.Message
-
-            # Extract HTTP status code when available
-            if ($_.Exception.Response) {
-                $StatusCode = [int]$_.Exception.Response.StatusCode
-            }
-
-            $FailedTargets++
-
-            Write-Host "[ERROR] ${ResponseTime}ms | $Url | $ErrorMessage" `
-                -ForegroundColor Red
-        }
+        Write-Host "[FAILED] $Message | $($Test.ErrorMessage)" -ForegroundColor Red
     }
-
-    # Store test result
-    $TestResults.Add([PSCustomObject]@{
-        Timestamp     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        URL           = $Url
-        StatusCode    = $StatusCode
-        ResponseTimeMs = $ResponseTime
-        Result        = $Result
-        ErrorMessage  = $ErrorMessage
-    })
 }
 
-# Export results to CSV
-try {
-    $TestResults | Export-Csv `
-        -Path $ReportFilePath `
-        -NoTypeInformation `
-        -Encoding UTF8 `
-        -Delimiter ";"
+# ==========================================
+# REPORT GENERATION
+# ==========================================
 
-    Write-Host "`n[INFO] Report successfully exported: $ReportFilePath" `
-        -ForegroundColor Cyan
+$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+$CsvReport = Join-Path $ReportDirectory "smoke-test_$Timestamp.csv"
+$JsonReport = Join-Path $ReportDirectory "smoke-test_$Timestamp.json"
+
+try {
+
+    # Export CSV report
+    $TestResults | Export-Csv `
+        -Path $CsvReport `
+        -NoTypeInformation `
+        -Encoding utf8
+
+    # Export JSON report
+    $TestResults | ConvertTo-Json -Depth 5 |
+        Set-Content -Path $JsonReport -Encoding utf8
+
+    Write-Host "`n[INFO] Reports generated successfully." -ForegroundColor Cyan
 }
 catch {
-    Write-Host "[ERROR] Failed to export CSV report: $($_.Exception.Message)" `
+
+    Write-Host "[ERROR] Report generation failed: $($_.Exception.Message)" `
         -ForegroundColor Red
+
     exit 1
 }
 
-# Display execution summary
-Write-Host "`n======================================" -ForegroundColor Cyan
-Write-Host "              TEST SUMMARY" -ForegroundColor Cyan
-Write-Host "======================================" -ForegroundColor Cyan
+# ==========================================
+# EXECUTION SUMMARY
+# ==========================================
 
-Write-Host "Total Targets:     $TotalTargets"
-Write-Host "Successful:        $SuccessfulTargets" -ForegroundColor Green
-Write-Host "Failed:            $FailedTargets" -ForegroundColor Red
+$EndTime = Get-Date
+$Duration = [math]::Round(($EndTime - $StartTime).TotalSeconds, 2)
 
-if ($ResponseTimes = @($TestResults | Where-Object { $null -ne $_.ResponseTimeMs })) {
-    $AverageResponseTime = ($ResponseTimes | Measure-Object -Property ResponseTimeMs -Average).Average
-    Write-Host "Average Response:  $([math]::Round($AverageResponseTime, 2)) ms"
+$TotalTargets = $TestResults.Count
+
+$SuccessfulTargets = @(
+    $TestResults | Where-Object { $_.Result -eq "SUCCESS" }
+).Count
+
+$FailedTargets = $TotalTargets - $SuccessfulTargets
+
+$SlowTargets = @(
+    $TestResults | Where-Object { $_.LatencyStatus -eq "SLOW" }
+).Count
+
+$AverageResponse = $TestResults |
+    Where-Object { $null -ne $_.ResponseTimeMs } |
+    Measure-Object -Property ResponseTimeMs -Average
+
+$AverageLatency = if ($AverageResponse.Count -gt 0) {
+    [math]::Round($AverageResponse.Average, 2)
+}
+else {
+    0
 }
 
-Write-Host "CSV Report:        $ReportFilePath"
-Write-Host "======================================`n" -ForegroundColor Cyan
+$SuccessRate = if ($TotalTargets -gt 0) {
+    [math]::Round(($SuccessfulTargets / $TotalTargets) * 100, 2)
+}
+else {
+    0
+}
 
-# Return an appropriate exit code
+Write-Host "`n==========================================" -ForegroundColor Cyan
+Write-Host "              TEST SUMMARY" -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+
+Write-Host "Total Targets:      $TotalTargets"
+Write-Host "Successful:         $SuccessfulTargets" -ForegroundColor Green
+Write-Host "Failed:             $FailedTargets" -ForegroundColor Red
+Write-Host "Slow Endpoints:     $SlowTargets" -ForegroundColor Yellow
+Write-Host "Success Rate:       $SuccessRate%"
+Write-Host "Average Latency:    $AverageLatency ms"
+Write-Host "Execution Time:     $Duration seconds"
+
+Write-Host "`nCSV Report:         $CsvReport"
+Write-Host "JSON Report:        $JsonReport"
+
+Write-Host "==========================================`n" -ForegroundColor Cyan
+
+# Return appropriate exit code
 if ($FailedTargets -gt 0) {
     exit 1
 }
